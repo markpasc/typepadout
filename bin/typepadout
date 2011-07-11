@@ -1,0 +1,121 @@
+#!/usr/bin/env python
+
+from functools import wraps
+import json
+import logging
+import os
+from os.path import join
+
+from oauth.oauth import OAuthConsumer, OAuthToken
+import remoteobjects.http
+from termtool import Termtool, subcommand, argument
+import typepad
+
+
+default = object()
+
+
+def authd(fn):
+    @wraps(fn)
+    def moo(self, args):
+        if not all((args.api_key, args.access_token)):
+            logging.error("Not configured to use Tumblr API yet; try 'configure' command first")
+            sys.exit(1)
+
+        consumer = OAuthConsumer(*args.api_key.split(':', 1))
+        access_token = OAuthToken(*args.access_token.split(':', 1))
+
+        client = typepad.client
+        client.add_credentials(consumer, access_token, domain='api.typepad.com')
+
+        return fn(self, args, client)
+    return moo
+
+
+@argument('--api-key', help='TypePad application API key (in `token:secret` format)')
+@argument('--access-token', help='TypePad access token (in `token:secret` format)')
+class TypePadOut(Termtool):
+
+    description = 'Export a TypePad weblog.'
+
+    @subcommand(help='configures the API keys')
+    def configure(self, args):
+        if not args.api_key:
+            token = raw_input('Consumer Key: ')
+            secret = raw_input('Consumer Secret: ')
+            args.api_key = ':'.join((token, secret))
+
+        if not args.access_token:
+            app_id = raw_input('Application ID: ')
+
+            csr = OAuthConsumer(*args.api_key.split(':', 1))
+            app = typepad.Application.get_by_id(app_id)
+            access_token = typepad.client.interactive_authorize(csr, app)
+
+            args.access_token = ':'.join((access_token.key, access_token.secret))
+            logging.debug("ACCESS TOKEN: %r", args.access_token)
+
+        self.write_config_file(
+            '--api-key', args.api_key,
+            '--access-token', args.access_token,
+        )
+
+        print "Configured!"
+
+    @subcommand(help='verify that the saved authentication keys are good')
+    @authd
+    def verify(self, args, client):
+        user = typepad.User.get_self()
+        logging.debug('User is %s', user.display_name)
+        logging.info("Verified!")
+
+    @subcommand(help="list the authorized user's blogs")
+    @authd
+    def blogs(self, args, client):
+        user = typepad.User.get_self()
+        blogs = user.blogs
+
+        table = self.table(['ID', 'Title', 'URL'])
+        for blog in blogs:
+            table.add_row([blog.url_id, blog.title, blog.home_url])
+        print table
+
+    def export_post(self, args, post):
+        with open(join(args.dir, post.url_id + '.json'), 'w') as f:
+            f.write(json.dumps(
+                post.to_dict(),
+                default=remoteobjects.http.omit_nulls,
+                sort_keys=True,
+                indent=4,
+            ))
+        # TODO: write out referenced images
+
+    @argument('url_id', help='URL ID of the blog to export')
+    @argument('--dir', required=True, help='directory into which to write export files')
+    @subcommand(help='export a TypePad weblog')
+    @authd
+    def export(self, args, client):
+        if not os.access(args.dir, os.F_OK):
+            os.makedirs(args.dir)
+
+        blog = typepad.Blog.get_by_url_id(args.url_id)
+        logging.info(blog.title)
+
+        first_post = blog.post_assets[:1]
+        total = first_post.total_results
+        offset = 1
+
+        progress = self.progressbar(maxval=total).start()
+        while offset < total:
+            progress.update(offset)
+            posts = blog.post_assets[offset:offset+50]
+            for post in posts:
+                self.export_post(args, post)
+            offset += 50
+
+        progress.update(total)
+        progress.finish()
+
+
+if __name__ == '__main__':
+    TypePadOut().run()
