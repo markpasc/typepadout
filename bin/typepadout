@@ -6,6 +6,7 @@ import logging
 import os
 from os.path import join
 
+import httplib2
 from oauth.oauth import OAuthConsumer, OAuthToken
 import remoteobjects.http
 from termtool import Termtool, subcommand, argument
@@ -80,6 +81,8 @@ class TypePadOut(Termtool):
             table.add_row([blog.url_id, blog.title, blog.home_url])
         print table
 
+    http = httplib2.Http()
+
     def export_post(self, args, post):
         with open(join(args.dir, post.url_id + '.json'), 'w') as f:
             f.write(json.dumps(
@@ -88,7 +91,19 @@ class TypePadOut(Termtool):
                 sort_keys=True,
                 indent=4,
             ))
-        # TODO: write out referenced images
+
+        for image in post.embedded_image_links:
+            # Only get images that TypePad can resize (since those are the ones that are assets).
+            if not image.url_template:
+                continue
+
+            resp, cont = self.http.request(image.url)
+            filename = image.url.split('/')[-1]
+            if '.' not in filename:
+                ext = resp['content-type'].split('/')[-1]
+                filename = '.'.join((filename, ext))
+            with open(join(args.dir, filename), 'wb') as f:
+                f.write(cont)
 
     @argument('url_id', help='URL ID of the blog to export')
     @argument('--dir', required=True, help='directory into which to write export files')
@@ -107,11 +122,11 @@ class TypePadOut(Termtool):
 
         progress = self.progressbar(maxval=total).start()
         while offset < total:
-            progress.update(offset)
             posts = blog.post_assets[offset:offset+50]
             for post in posts:
                 self.export_post(args, post)
-            offset += 50
+                progress.update(offset)
+                offset += 1
 
         progress.update(total)
         progress.finish()
